@@ -15,8 +15,8 @@ First, install all dependencies from `requirements.txt`:
 ```bash
 pip install -r requirements.txt
 
-```bash
+
 python main.py
 
-```bash
+
 python inference.py
