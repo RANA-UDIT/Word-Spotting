@@ -111,7 +111,7 @@ class WordSpottingInference:
         self.use_cuda = torch.cuda.is_available()
     
     def load_model(self, model_path):
-        """Load trained model for inference"""
+   
         print(f" Loading model from {model_path}...")
         
         if not os.path.exists(model_path):
@@ -119,10 +119,10 @@ class WordSpottingInference:
             return False
         
         try:
-            # Use weights_only=False to handle scikit-learn objects
+       
             model_data = torch.load(model_path, map_location='cpu', weights_only=False)
             
-            # Restore components
+          
             self.fisher.pca = model_data['fisher_pca']
             self.fisher.gmm = model_data['fisher_gmm']
             self.fisher.vocab_size = model_data['fisher_vocab_size']
@@ -130,17 +130,17 @@ class WordSpottingInference:
             self.phoc.levels = model_data['phoc_levels']
             self.phoc.bigrams = model_data['phoc_bigrams']
             
-            # Restore PyTorch model with correct architecture
+   
             if model_data['model_state_dict'] is not None:
                 input_dim = model_data['input_dim']
                 output_dim = model_data['output_dim']
                 
-                print(f"📏 Model dimensions - Input: {input_dim}, Output: {output_dim}")
+                print(f"Model dimensions - Input: {input_dim}, Output: {output_dim}")
                 
-                # Use the simple model architecture that matches training
+     
                 self.model = RobustTorchPHOCModel(input_dim, output_dim)
                 
-                # Load state dict
+                
                 self.model.load_state_dict(model_data['model_state_dict'])
                 self.model.eval()
                 
@@ -160,10 +160,10 @@ class WordSpottingInference:
             print("🔄 Trying alternative loading method...")
             
             try:
-                # Alternative loading approach
+          
                 model_data = torch.load(model_path, map_location='cpu')
                 
-                # Manual component restoration
+           
                 if 'fisher_pca' in model_data:
                     self.fisher.pca = model_data['fisher_pca']
                 if 'fisher_gmm' in model_data:
@@ -175,7 +175,7 @@ class WordSpottingInference:
                 if 'phoc_bigrams' in model_data:
                     self.phoc.bigrams = model_data['phoc_bigrams']
                 
-                # Model loading
+
                 if 'model_state_dict' in model_data and model_data['model_state_dict'] is not None:
                     input_dim = model_data.get('input_dim', 256)  # Default if not found
                     output_dim = model_data.get('output_dim', 62)  # Default if not found
@@ -195,7 +195,7 @@ class WordSpottingInference:
                 return False
     
     def load_and_preprocess_image(self, image_path, target_height=64):
-        """Load and preprocess image"""
+
         try:
             image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
             if image is None:
@@ -206,7 +206,7 @@ class WordSpottingInference:
             new_w = max(32, int(w * target_height / h))
             resized = cv2.resize(image, (new_w, target_height))
             
-            # Enhance contrast
+
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
             enhanced = clahe.apply(resized)
             
@@ -216,11 +216,11 @@ class WordSpottingInference:
             return None
     
     def extract_sift_features(self, image):
-        """Extract SIFT features from image"""
+ 
         try:
             sift = cv2.SIFT_create()
             
-            # Dense sampling
+     
             keypoints = []
             step_size = 12
             for y in range(0, image.shape[0], step_size):
@@ -230,7 +230,7 @@ class WordSpottingInference:
             _, descriptors = sift.compute(image, keypoints)
             
             if descriptors is None or len(descriptors) == 0:
-                # Fallback: create synthetic descriptors
+          
                 print("⚠️ No SIFT features found, using fallback descriptors")
                 descriptors = np.random.randn(20, 128).astype(np.float32)
             
@@ -241,7 +241,7 @@ class WordSpottingInference:
             return np.random.randn(20, 128).astype(np.float32)
     
     def extract_features(self, image_path):
-        """Extract Fisher Vector features from image"""
+
         try:
             image = self.load_and_preprocess_image(image_path)
             if image is None:
@@ -259,7 +259,7 @@ class WordSpottingInference:
             return None
     
     def predict_phoc_from_image(self, image_path):
-        """Predict PHOC representation from image"""
+    
         if self.model is None:
             print(" Model not loaded")
             return None
@@ -270,7 +270,7 @@ class WordSpottingInference:
             print(f" Could not extract features from {image_path}")
             return None
         
-        # Predict PHOC
+      
         self.model.eval()
         with torch.no_grad():
             fv_tensor = torch.FloatTensor(fv).unsqueeze(0)
@@ -288,7 +288,7 @@ class WordSpottingInference:
         return predicted_phoc
     
     def query_by_image(self, query_image_path, database_images, top_k=5):
-        """Query by image - find similar images"""
+     
         print(f" Querying by image: {query_image_path}")
         
         query_phoc = self.predict_phoc_from_image(query_image_path)
@@ -297,7 +297,7 @@ class WordSpottingInference:
             return []
         
         print(" Processing database images...")
-        # Extract PHOCs for all database images
+   
         database_phocs = {}
         for i, img_path in enumerate(database_images):
             if i % 10 == 0:
@@ -332,18 +332,18 @@ class WordSpottingInference:
                 
             similarities[img_path] = sim
         
-        # Return top matches
+
         results = sorted(similarities.items(), key=lambda x: x[1], reverse=True)[:top_k]
         return results
     
     def query_by_string(self, query_string, database_images, top_k=5):
-        """Query by text string - find images matching the text"""
+   
         print(f" Querying by text: '{query_string}'")
         
         query_phoc = self.phoc(query_string)
         
         print(" Processing database images...")
-        # Extract PHOCs for all database images
+      
         database_phocs = {}
         for i, img_path in enumerate(database_images):
             if i % 10 == 0:
@@ -358,7 +358,7 @@ class WordSpottingInference:
             print(" No valid database images found")
             return []
         
-        # Calculate similarities
+      
         similarities = {}
         query_phoc_flat = query_phoc.flatten()
         
@@ -366,7 +366,7 @@ class WordSpottingInference:
             phoc_flat = phoc.flatten()
             min_dim = min(len(query_phoc_flat), len(phoc_flat))
             
-            # Cosine similarity
+          
             dot_product = np.dot(query_phoc_flat[:min_dim], phoc_flat[:min_dim])
             norm_query = np.linalg.norm(query_phoc_flat[:min_dim])
             norm_db = np.linalg.norm(phoc_flat[:min_dim])
@@ -382,23 +382,23 @@ class WordSpottingInference:
         results = sorted(similarities.items(), key=lambda x: x[1], reverse=True)[:top_k]
         return results
 
-def load_sample_images(data_root, max_images=100):
-    """Load sample images for the database"""
+def load_sample_images(data_root, max_images=1000):
+
     image_paths = []
     data_path = Path(data_root)
     
-    print("📂 Loading sample images...")
+    print("Loading sample images...")
     
-    # Look for common image extensions
+ 
     extensions = ['*.png', '*.jpg', '*.jpeg', '*.bmp', '*.tiff']
     all_image_files = []
     
     for ext in extensions:
         all_image_files.extend(list(data_path.rglob(ext)))
     
-    print(f"📁 Found {len(all_image_files)} total images")
+    print(f" Found {len(all_image_files)} total images")
     
-    # Use subset
+
     subset_files = all_image_files[:max_images]
     for img_path in subset_files:
         image_paths.append(str(img_path))
@@ -407,7 +407,7 @@ def load_sample_images(data_root, max_images=100):
     return image_paths
 
 def display_results(results, query_type, query_value):
-    """Display search results in a formatted way"""
+
     if not results:
         print(" No results found")
         return
@@ -428,16 +428,16 @@ def main():
     print(" Word Spotting Inference System")
     print("=" * 50)
     
-    # Initialize inference system
+
     inference_system = WordSpottingInference()
     
-    # Load trained model
+
     if not inference_system.load_model(MODEL_PATH):
         print(" Failed to load model. Exiting...")
         return
     
-    # Load sample images for database
-    database_images = load_sample_images(DATA_ROOT, 100)
+
+    database_images = load_sample_images(DATA_ROOT, 1000)
     
     if not database_images:
         print(" No database images found. Exiting...")
@@ -448,11 +448,11 @@ def main():
     
     while True:
         print("\n Choose query type:")
-        print("1. Query by Image (find similar handwritten words)")
-        print("2. Query by Text (find images matching text)")
+        print("1. Query by Image ")
+        print("2. Query by Text ")
         print("3. Exit")
         
-        choice = input("\nEnter your choice (1-3): ").strip()
+        choice = input("\nEnter your choice: ").strip()
         
         if choice == "1":
             # Query by Image
@@ -467,7 +467,7 @@ def main():
             display_results(results, "image", os.path.basename(query_path))
                 
         elif choice == "2":
-            # Query by Text
+         
             query_text = input("Enter text to search for: ").strip()
             if not query_text:
                 print(" Please enter valid text!")
