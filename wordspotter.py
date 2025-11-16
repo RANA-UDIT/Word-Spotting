@@ -2,7 +2,8 @@ import os
 import numpy as np
 import cv2
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.metrics.pairwise import cosine_similarity, rbf_kernel
+from sklearn.cross_decomposition import CCA
 import matplotlib.pyplot as plt
 import pickle
 import glob
@@ -10,12 +11,76 @@ from tqdm import tqdm
 import warnings
 warnings.filterwarnings('ignore')
 
+class KCCA:
+    def __init__(self, n_components=2, kernel='rbf', gamma=None, reg_param=1e-3):
+        self.n_components = n_components
+        self.kernel = kernel
+        self.gamma = gamma
+        self.reg_param = reg_param
+        self.alpha = None
+        self.X_train = None
+        
+    def _compute_kernel(self, X, Y=None):
+        if Y is None:
+            Y = X
+        if self.kernel == 'rbf':
+            if self.gamma is None:
+                self.gamma = 1.0 / X.shape[1]
+            return rbf_kernel(X, Y, gamma=self.gamma)
+        elif self.kernel == 'linear':
+            return X.dot(Y.T)
+        else:
+            raise ValueError("Unsupported kernel")
+    
+    def fit(self, X, Y):
+        self.X_train = X
+        n_samples = X.shape[0]
+        
+        # Compute kernel matrices
+        K_x = self._compute_kernel(X)
+        K_y = self._compute_kernel(Y)
+        
+        # Regularization
+        I = np.eye(n_samples)
+        K_x_reg = K_x + self.reg_param * I
+        K_y_reg = K_y + self.reg_param * I
+        
+        # Solve generalized eigenvalue problem for KCCA
+        # (K_x_reg^-1 K_x K_y_reg^-1 K_y) alpha = lambda^2 alpha
+        K_x_reg_inv = np.linalg.pinv(K_x_reg)
+        K_y_reg_inv = np.linalg.pinv(K_y_reg)
+        
+        M = K_x_reg_inv.dot(K_x).dot(K_y_reg_inv).dot(K_y)
+        
+        # Eigen decomposition
+        eigenvalues, eigenvectors = np.linalg.eig(M)
+        
+        # Sort by eigenvalues in descending order
+        idx = np.argsort(eigenvalues.real)[::-1]
+        eigenvalues = eigenvalues[idx]
+        eigenvectors = eigenvectors[:, idx]
+        
+        # Store transformation matrix
+        self.alpha = eigenvectors[:, :self.n_components].real
+        
+        return self
+    
+    def transform(self, X):
+        if self.alpha is None:
+            raise ValueError("KCCA not fitted yet")
+        
+        K_test = self._compute_kernel(X, self.X_train)
+        return K_test.dot(self.alpha)
+
 class PHOCGenerator:
     def __init__(self, alphabet='abcdefghijklmnopqrstuvwxyz', levels=[2, 3], bigrams=None):
         self.alphabet = alphabet
         self.levels = levels
         self.bigrams = bigrams or []
         self.dim = len(alphabet) * sum(levels) + len(bigrams) * 2
+        self.kcca = None
+        self.cca = None
+        self.is_fitted = False
         
     def get_occupancy(self, char_idx, word_len, level):
         if word_len == 0:
@@ -35,7 +100,90 @@ class PHOCGenerator:
                 occupancy.append(region_idx)
         return occupancy
     
-    def string_to_phoc(self, word):
+    def fit_kcca_cca(self, visual_features, phoc_features):
+        """Fit KCCA and CCA transformations using visual and PHOC features"""
+        # print("Fitting KCCA and CCA transformations...")
+        
+        # Ensure we have enough samples for meaningful transformation
+        n_samples = min(visual_features.shape[0], phoc_features.shape[0])
+        if n_samples < 10:
+            print("Warning: Not enough samples for KCCA/CCA fitting")
+            self.is_fitted = False
+            return
+        
+        # Use subset of features for computational efficiency
+        visual_subset = visual_features[:n_samples]
+        phoc_subset = phoc_features[:n_samples]
+        
+        # Determine optimal number of components
+        n_components = min(50, n_samples // 2, visual_subset.shape[1] // 2, phoc_subset.shape[1] // 2)
+        n_components = max(2, n_components)
+        
+        try:
+            # Fit KCCA
+            self.kcca = KCCA(n_components=n_components, kernel='rbf', gamma=0.1, reg_param=1e-2)
+            self.kcca.fit(visual_subset, phoc_subset)
+            
+            # Fit CCA
+            self.cca = CCA(n_components=n_components)
+            self.cca.fit(visual_subset, phoc_subset)
+            
+            self.is_fitted = True
+            # print(f"KCCA and CCA fitted successfully with {n_components} components")
+            
+        except Exception as e:
+            print(f"Error fitting KCCA/CCA: {e}")
+            self.is_fitted = False
+    
+    def apply_kcca_cca_transformation(self, phoc_vector, visual_feature=None):
+        """Apply KCCA and CCA transformations to PHOC vector"""
+        if not self.is_fitted or self.kcca is None or self.cca is None:
+            return phoc_vector
+        
+        try:
+            # Reshape for transformation
+            phoc_reshaped = phoc_vector.reshape(1, -1)
+            
+            # Apply KCCA transformation
+            if visual_feature is not None:
+                visual_reshaped = visual_feature.reshape(1, -1)
+                kcca_transformed = self.kcca.transform(visual_reshaped)
+                
+                # Apply CCA transformation
+                cca_transformed_x, cca_transformed_y = self.cca.transform(visual_reshaped, phoc_reshaped)
+                
+                # Combine original PHOC with transformed features
+                # Use weighted combination
+                alpha = 0.3  # Weight for transformed features
+                
+                # Ensure all arrays have the same number of samples for concatenation
+                kcca_flat = kcca_transformed.flatten()
+                cca_flat = cca_transformed_y.flatten()
+                
+                # Pad or truncate to match dimensions if necessary
+                target_dim = len(phoc_vector)
+                if len(kcca_flat) < target_dim:
+                    kcca_padded = np.pad(kcca_flat, (0, target_dim - len(kcca_flat)), mode='constant')
+                else:
+                    kcca_padded = kcca_flat[:target_dim]
+                
+                if len(cca_flat) < target_dim:
+                    cca_padded = np.pad(cca_flat, (0, target_dim - len(cca_flat)), mode='constant')
+                else:
+                    cca_padded = cca_flat[:target_dim]
+                
+                # Combine features
+                enhanced_phoc = (1 - alpha) * phoc_vector + alpha * (kcca_padded + cca_padded) / 2
+                
+                return enhanced_phoc
+            else:
+                return phoc_vector
+                
+        except Exception as e:
+            print(f"Error in KCCA/CCA transformation: {e}")
+            return phoc_vector
+    
+    def string_to_phoc(self, word, visual_feature=None):
         word = word.lower()
         word = ''.join(c for c in word if c.isalpha())
         if not word:
@@ -69,7 +217,10 @@ class PHOCGenerator:
                 if present:
                     phoc[idx] = 1.0
                 idx += 1
-        return phoc
+        
+        # Apply KCCA and CCA transformations before returning
+        enhanced_phoc = self.apply_kcca_cca_transformation(phoc, visual_feature)
+        return enhanced_phoc
 
 class WordSpotter:
     def __init__(self, data_path):
@@ -81,6 +232,7 @@ class WordSpotter:
         self.image_paths = []
         self.features = None
         self.feature_mappers = []
+        self.visual_features = []  # Store visual features for KCCA/CCA
         
         self.common_words = [
             'move', 'stop', 'labour', 'peers', 'meeting', 'mr', 'mp',
@@ -104,7 +256,7 @@ class WordSpotter:
         except:
             return np.zeros(3780)
     
-    def load_images(self, num_images=50):
+    def load_images(self, num_images=0):
         print(f"Loading {num_images} images...")
         image_extensions = ['*.png', '*.jpg', '*.jpeg']
         all_image_files = []
@@ -153,24 +305,28 @@ class WordSpotter:
         )
     
     def train(self):
-        print("Training Word Spotting System...")
+        # print("Training Word Spotting System...")
         self.create_phoc()
         
-        print("Extracting features...")
+        # print("Extracting features...")
         features = []
         for img in tqdm(self.word_images):
             feat = self.extract_features(img)
             features.append(feat)
         features = np.array(features)
+        self.visual_features = features  # Store for KCCA/CCA
         
-        print("Generating PHOC attributes...")
+        # print("Generating PHOC attributes...")
         phoc_attributes = []
         for label in self.word_labels:
             phoc = self.phoc_generator.string_to_phoc(label)
             phoc_attributes.append(phoc)
         phoc_attributes = np.array(phoc_attributes)
         
-        print("Training models...")
+        # Fit KCCA and CCA transformations
+        self.phoc_generator.fit_kcca_cca(features, phoc_attributes)
+        
+     
         from sklearn.linear_model import Ridge
         self.feature_mappers = []
         for i in tqdm(range(phoc_attributes.shape[1])):
@@ -180,11 +336,11 @@ class WordSpotter:
             mapper.fit(features, y_binary)
             self.feature_mappers.append(mapper)
         
-        print("Calibrating features...")
+        
         predicted_scores = self.predict_scores(features)
         self.features = self.scaler.fit_transform(predicted_scores)
         
-        print("Training completed!")
+        # print("Training completed!")
         return True
     
     def predict_scores(self, features):
@@ -196,7 +352,10 @@ class WordSpotter:
         return scores
     
     def query_by_string(self, query_string, top_k=5):
-        query_phoc = self.phoc_generator.string_to_phoc(query_string)
+        # Extract visual feature from query (using average visual feature as proxy)
+        avg_visual_feature = np.mean(self.visual_features, axis=0) if len(self.visual_features) > 0 else None
+        
+        query_phoc = self.phoc_generator.string_to_phoc(query_string, avg_visual_feature)
         query_scaled = self.scaler.transform([query_phoc])[0]
         similarities = cosine_similarity([query_scaled], self.features)[0]
         top_indices = np.argsort(similarities)[::-1][:top_k]
@@ -220,23 +379,24 @@ class WordSpotter:
             'features': self.features,
             'word_labels': self.word_labels,
             'image_paths': self.image_paths,
-            'word_images': self.word_images
+            'word_images': self.word_images,
+            'visual_features': self.visual_features
         }
-        with open(model_path, 'wb') as f:
-            pickle.dump(model_data, f)
-        print(f"Model saved to: {model_path}")
+        # with open(model_path, 'wb') as f:
+            # pickle.dump(model_data, f)
+        # print(f"Model saved to: {model_path}")
 
-def show_images_before_query(spotter):
-    print("\nSample images from dataset:")
-    print("="*40)
-    for i in range(min(5, len(spotter.word_images))):
-        plt.figure(figsize=(3, 1.5))
-        plt.imshow(spotter.word_images[i], cmap='gray')
-        plt.title(f"Image {i+1}: '{spotter.word_labels[i]}'")
-        plt.axis('off')
-        plt.tight_layout()
-        plt.show()
-        print(f"Image {i+1}: {os.path.basename(spotter.image_paths[i])} -> '{spotter.word_labels[i]}'")
+# def show_images_before_query(spotter):
+    # print("\nSample images from dataset:")
+    # print("="*40)
+    # for i in range(min(5, len(spotter.word_images))):
+        # plt.figure(figsize=(3, 1.5))
+        # plt.imshow(spotter.word_images[i], cmap='gray')
+        # plt.title(f"Image {i+1}: '{spotter.word_labels[i]}'")
+        # plt.axis('off')
+        # plt.tight_layout()
+        # plt.show()
+        # print(f"Image {i+1}: {os.path.basename(spotter.image_paths[i])} -> '{spotter.word_labels[i]}'")
 
 def display_results_with_images(results, query_string):
     print(f"\nQuery: '{query_string}'")
@@ -259,14 +419,13 @@ if __name__ == "__main__":
     spotter = WordSpotter(data_path)
     spotter.load_images(num_images=50)
     
-    show_images_before_query(spotter)
+    # show_images_before_query(spotter)
     
-    print("\nTraining model...")
+    # print("\nTraining model...")
     success = spotter.train()
     
     if success:
         spotter.save_model(model_path)
-        
         # test_queries = ["move", "labour", "meeting", "the", "a"]
         test_queries = ["labour"]
         for query in test_queries:
